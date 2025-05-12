@@ -8,11 +8,10 @@ Physics-informed neural networks (PINNs) show promise for structural health moni
 Case Study 1 Schematic of Physics-Informed Neural Networks (PINNs).
 ![alt text](https://github.com/AnmarAl-Adly/PINNs_Virtual_Sensing/blob/main/Figures/Fig.2.png)
 Case Study 2 Schematic of Physics-Informed Neural Networks (PINNs).
-## Case Studies
-## Summary of Case Studies
 
-| Case Study Number   | Inputs               | Outputs              | Loss Functions Terms    | Code Source            |
-|---------------------|----------------------|----------------------|-------------------------|------------------------|
-| Case_study_1        | Sptial and temporal domains   | Predicted values     | MSE + Regularization    | Case_study_1/SN5/code.py |
-| Case_study_2        | Sptail, temporal and axle load domains | Classification       | Cross-Entropy           | Case_study_2/main.py   |
-| Case_study_3        | Sptial, temporal domains, and sensor data   | Regression output    | MAE + L2 Penalty        | Case_study_3/SN4/script.py |
+## Summary of Case Studies
+| Case Study Number   | PINNs Inputs                          | PINNs Outputs                                | Loss Functions Terms    | Code Source                 |
+|---------------------|---------------------------------------|----------------------------------------------|-------------------------|-----------------------------|
+| Case_study_1        | Spatial and temporal domains          | Predicted deflection and internal forces     | MSE + Regularization    | Case_study_1/SN5/code.py    |
+| Case_study_2        | Spatial, temporal, and axle load domains | Predicted deflection and internal forces  | Cross-Entropy           | Case_study_2/main.py        |
+| Case_study_3        | Spatial, temporal domains, and sensor data | Predicted deflection and strain history diagram | MAE + L2 Penalty    | Case_study_3/SN4/script.py  |

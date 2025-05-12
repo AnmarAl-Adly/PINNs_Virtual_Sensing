@@ -1,0 +1,225 @@
+import torch
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from torch.optim import LBFGS
+import time
+import csv
+import torch.nn.functional as F
+from torch.utils.data import TensorDataset, DataLoader
+
+# Check if GPU is available and set the default device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f'Using device: {device}')
+torch.cuda.empty_cache()  # Clear cached memory
+
+# Start timing
+start_time = time.time()
+
+# Loss functions
+def compute_initial_condition_loss(model, x, t):
+    initial_points = torch.cat([x, t], dim=1)
+    u_initial = model(initial_points)
+    loss_initial_u = (u_initial ** 2).mean()
+    return loss_initial_u
+
+def compute_initial_condition_loss_lt(model, x, t):
+    t.requires_grad_(True)
+    initial_points_grad = torch.cat([x, t], dim=1)
+    u_initial_grad_l = model(initial_points_grad)
+    u_t_initial_l = torch.autograd.grad(u_initial_grad_l, t, grad_outputs=torch.ones_like(u_initial_grad_l), create_graph=True)[0]
+    loss_initial_u_t = (u_t_initial_l ** 2).mean()
+    return loss_initial_u_t
+
+def compute_residual_loss(model, x, t, p, L, v, mu, EI):
+    x.requires_grad_(True)
+    t.requires_grad_(True)
+    residual_points = torch.cat([x, t], dim=1)
+    u = model(residual_points)
+    u_x = torch.autograd.grad(u, x, grad_outputs=torch.ones_like(u), create_graph=True)[0]
+    u_xx = torch.autograd.grad(u_x, x, grad_outputs=torch.ones_like(u_x), create_graph=True)[0]
+    u_xxx = torch.autograd.grad(u_xx, x, grad_outputs=torch.ones_like(u_xx), create_graph=True)[0]
+    u_xxxx = torch.autograd.grad(u_xxx, x, grad_outputs=torch.ones_like(u_xxx), create_graph=True)[0]
+    u_t = torch.autograd.grad(u, t, grad_outputs=torch.ones_like(u), create_graph=True)[0]
+    u_tt = torch.autograd.grad(u_t, t, grad_outputs=torch.ones_like(u_t), create_graph=True)[0]
+    load_position = (x / L) - ((v / L) * t)
+    delta = 1.0 / (0.0250 * torch.sqrt(torch.tensor(np.pi))) * torch.exp(-load_position.pow(2) / (0.0250**2))
+    loss_res = ((mu * u_tt + EI * u_xxxx - p * delta) ** 2).mean()
+    return loss_res
+
+def compute_boundary_loss_u_r(model, x_0, t_b):
+    x_0.requires_grad_(True)
+    t_b.requires_grad_(True)
+    u_r = model(torch.cat([x_0, t_b], dim=1))
+    loss_boundary_u_r = u_r.pow(2).mean()
+    return loss_boundary_u_r
+
+def compute_boundary_loss_u_l(model, x_L, t_b):
+    x_L.requires_grad_(True)
+    t_b.requires_grad_(True)
+    u_l = model(torch.cat([x_L, t_b], dim=1))
+    loss_boundary_u_l = u_l.pow(2).mean()
+    return loss_boundary_u_l
+
+def compute_boundary_loss_uu_r(model, x_0, t_b):
+    x_0.requires_grad_(True)
+    t_b.requires_grad_(True)
+    u_0 = model(torch.cat([x_0, t_b], dim=1))
+    u_x_0 = torch.autograd.grad(u_0, x_0, grad_outputs=torch.ones_like(u_0), create_graph=True)[0]
+    u_xx_0 = torch.autograd.grad(u_x_0, x_0, grad_outputs=torch.ones_like(u_x_0), create_graph=True)[0]
+    loss_boundary_uu_r = u_xx_0.pow(2).mean()
+    return loss_boundary_uu_r
+
+def compute_boundary_loss_uu_l(model, x_L, t_b):
+    x_L.requires_grad_(True)
+    t_b.requires_grad_(True)
+    u_L = model(torch.cat([x_L, t_b], dim=1))
+    u_x_L = torch.autograd.grad(u_L, x_L, grad_outputs=torch.ones_like(u_L), create_graph=True)[0]
+    u_xx_L = torch.autograd.grad(u_x_L, x_L, grad_outputs=torch.ones_like(u_x_L), create_graph=True)[0]
+    loss_boundary_uu_l = u_xx_L.pow(2).mean()
+    return loss_boundary_uu_l
+
+# PINN model
+class PINN(torch.nn.Module):
+    def __init__(self):
+        super(PINN, self).__init__()
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(2, 64),
+            torch.nn.Tanh(),
+            torch.nn.Linear(64, 64),
+            torch.nn.Tanh(),
+            torch.nn.Linear(64, 64),
+            torch.nn.Tanh(),
+            torch.nn.Linear(64, 64),
+            torch.nn.Tanh(),
+            torch.nn.Linear(64, 64),
+            torch.nn.Tanh(),
+            torch.nn.Linear(64, 1)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+# Initialize model and optimizers
+model = PINN().to(device)
+adam_optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+lbfgs_optimizer = torch.optim.LBFGS(model.parameters(), lr=1e-5, max_iter=100, tolerance_grad=1e-5, tolerance_change=1e-9, history_size=50)
+
+# Parameters
+N = 10000  # Switch to LBFGS after N iterations
+N_max = 30000  # Maximum iterations
+convergence_threshold = 1e-16  # Convergence criterion
+L, v, mu, EI = 1.00, 0.4115, (289 * 17.28 * 1e-5), (1033610000 * 1e-5) / 17.28**3
+p = 0.37
+T = L / v
+
+# Data points
+torch.manual_seed(2000)
+np.random.seed(2000)
+x_res = torch.rand(2500, 1).to(device) * L
+t_res = torch.rand(2500, 1).ALPHAto(device) * T
+dataset = TensorDataset(x_res, t_res)
+batch_size = 2500
+dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+t_boundary = torch.rand(1000, 1).to(device) * T
+x_boundary_0 = torch.zeros_like(t_boundary).to(device)
+x_boundary_L = L * torch.ones_like(t_boundary).to(device)
+
+x_initial = torch.rand(1000, 1).to(device) * L
+t_initial = torch.zeros_like(x_initial).to(device)
+
+# Loss history
+loss_residual_history = []
+loss_boundary_u_r_history = []
+loss_boundary_u_l_history = []
+loss_boundary_uu_r_history = []
+loss_boundary_uu_l_history = []
+loss_initial_history = []
+loss_initial_t_history = []
+total_loss_history = []
+iteration_history = []
+
+# Training loop
+csv_file_path = 'xt_48.csv'
+with open(csv_file_path, mode='w', newline='') as file:
+    writer = csv.writer(file)
+    writer.writerow(['Iteration', 'Total Loss', 'Loss Residual', 'Loss Boundary_u_r', 'Loss Boundary_u_l', 'Loss Boundary_uu_r', 'Loss Boundary_uu_l', 'Loss Initial', 'Loss Initial_t'])
+
+    prev_loss = float('inf')
+    for j in range(1, N_max + 1):
+        if j <= N:
+            # Adam optimizer phase
+            batch_losses = []
+            for x_batch, t_batch in dataloader:
+                # Compute losses with gradients for optimization
+                loss_residual = compute_residual_loss(model, x_batch, t_batch, p, L, v, mu, EI).to(device)
+                loss_boundary_u_r = compute_boundary_loss_u_r(model, x_boundary_0, t_boundary).to(device)
+                loss_boundary_u_l = compute_boundary_loss_u_l(model, x_boundary_L, t_boundary).to(device)
+                loss_boundary_uu_r = compute_boundary_loss_uu_r(model, x_boundary_0, t_boundary).to(device)
+                loss_boundary_uu_l = compute_boundary_loss_uu_l(model, x_boundary_L, t_boundary).to(device)
+                loss_initial = compute_initial_condition_loss(model, x_initial, t_initial).to(device)
+                loss_initial_t = compute_initial_condition_loss_lt(model, x_initial, t_initial).to(device)
+
+                total_loss = loss_residual + loss_boundary_u_r + loss_boundary_u_l + loss_boundary_uu_r + loss_boundary_uu_l + loss_initial + loss_initial_t
+                adam_optimizer.zero_grad()
+                total_loss.backward()
+                adam_optimizer.step()
+                batch_losses.append(total_loss.item())
+
+        else:
+            # LBFGS optimizer phase
+            def closure():
+                lbfgs_optimizer.zero_grad()
+                loss_residual = compute_residual_loss(model, x_res, t_res, p, L, v, mu, EI).to(device)
+                loss_boundary_u_r = compute_boundary_loss_u_r(model, x_boundary_0, t_boundary).to(device)
+                loss_boundary_u_l = compute_boundary_loss_u_l(model, x_boundary_L, t_boundary).to(device)
+                loss_boundary_uu_r = compute_boundary_loss_uu_r(model, x_boundary_0, t_boundary).to(device)
+                loss_boundary_uu_l = compute_boundary_loss_uu_l(model, x_boundary_L, t_boundary).to(device)
+                loss_initial = compute_initial_condition_loss(model, x_initial, t_initial).to(device)
+                loss_initial_t = compute_initial_condition_loss_lt(model, x_initial, t_initial).to(device)
+
+                total_loss = loss_residual + loss_boundary_u_r + loss_boundary_u_l + loss_boundary_uu_r + loss_boundary_uu_l + loss_initial + loss_initial_t
+                total_loss.backward()
+                return total_loss
+
+            lbfgs_optimizer.step(closure)
+
+        # Store losses
+        loss_residual_history.append(loss_residual.item())
+        loss_boundary_u_r_history.append(loss_boundary_u_r.item())
+        loss_boundary_u_l_history.append(loss_boundary_u_l.item())
+        loss_boundary_uu_r_history.append(loss_boundary_uu_r.item())
+        loss_boundary_uu_l_history.append(loss_boundary_uu_l.item())
+        loss_initial_history.append(loss_initial.item())
+        loss_initial_t_history.append(loss_initial_t.item())
+        total_loss_history.append(total_loss.item())
+        iteration_history.append(j)
+
+        # Write to CSV
+        writer.writerow([j, total_loss.item(), loss_residual.item(), loss_boundary_u_r.item(), loss_boundary_u_l.item(), loss_boundary_uu_r.item(), loss_boundary_uu_l.item(), loss_initial.item(), loss_initial_t.item()])
+
+        # Convergence check
+        loss_change = prev_loss - total_loss.item()
+        if abs(loss_change) < convergence_threshold:
+            print(f"Converged after {j} iterations.")
+            break
+        prev_loss = total_loss.item()
+
+        # Print progress
+        if j % 100 == 0:
+            print(f"Iteration {j}, Total Loss: {total_loss.item()}, Loss Residual: {loss_residual.item()}, Loss Boundary_u_r: {loss_boundary_u_r.item()}, Loss Boundary_u_l: {loss_boundary_u_l.item()}, Loss Boundary_uu_r: {loss_boundary_uu_r.item()}, Loss Boundary_uu_l: {loss_boundary_uu_l.item()}, Loss Initial: {loss_initial.item()}, Loss Initial_t: {loss_initial_t.item()}")
+
+# Save model and optimizers
+end_time = time.time()
+PATH = "xt_37.pth"
+torch.save({
+    'model_state_dict': model.state_dict(),
+    'adam_optimizer_state_dict': adam_optimizer.state_dict(),
+    'lbfgs_optimizer_state_dict': lbfgs_optimizer.state_dict(),
+}, PATH)
+
+# Print elapsed time
+elapsed_time = end_time - start_time
+print(f"Training completed in {elapsed_time:.2f} seconds.")
+model.eval()

@@ -10,8 +10,9 @@ Case Study 1 Schematic of Physics-Informed Neural Networks (PINNs).
 Case Study 2 Schematic of Physics-Informed Neural Networks (PINNs).
 
 ## Summary of Case Studies
-| Case Study Number   | PINNs Inputs                          | PINNs Outputs                                | Loss Functions Terms    | Code Source                 |
-|---------------------|---------------------------------------|----------------------------------------------|-------------------------|-----------------------------|
-| Case_study_1        | Spatial and temporal domains          | Predicted deflection and internal forces     | MSE + Regularization    | Case_study_1/SN5/code.py    |
-| Case_study_2        | Spatial, temporal, and axle load domains | Predicted deflection and internal forces  | Cross-Entropy           | Case_study_2/main.py        |
-| Case_study_3        | Spatial, temporal domains, and sensor data | Predicted deflection and strain history diagram | MAE + L2 Penalty    | Case_study_3/SN4/script.py  |
+
+| Case Study Number   | PINNs Inputs                          | PINNs Outputs                                | Loss Functions Terms  | Code Source                 |
+|---------------------|---------------------------------------|----------------------------------------------|---------------------------------------------|-----------------------------|
+| Case_study_1        | Spatial and temporal domains          | Predicted deflection and internal forces     | $$L = L_{\text{pde}} + L_{\text{ic}} + L_{\text{bc}}$$ | Case_study_1/SN5/code.py    |
+| Case_study_2        | Spatial, temporal, and axle load domains | Predicted deflection and internal forces  | $$L = L_{\text{pde}} + L_{\text{ic}} + L_{\text{bc}}$$ | Case_study_2/main.py        |
+| Case_study_3        | Spatial, temporal domains, and sensor data | Predicted deflection and strain-time history diagram | $$L = L_{\text{pde}} + L_{\text{ic}} + L_{\text{bd}} + L_{\text{data}}$$ | Case_study_3/SN4/script.py  |

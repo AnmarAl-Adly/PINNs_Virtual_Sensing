@@ -8,3 +8,4 @@ Physics-informed neural networks (PINNs) show promise for structural health moni
 Case Study 1 Schematic of Physics-Informed Neural Networks (PINNs).
 ![alt text](https://github.com/AnmarAl-Adly/PINNs_Virtual_Sensing/blob/main/Figures/Fig.2.jpg)
 Case Study 2 Schematic of Physics-Informed Neural Networks (PINNs).
+https://github.com/AnmarAl-Adly/PINNs_Virtual_Sensing/blob/main/Figures/Fig.1.png

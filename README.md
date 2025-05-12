@@ -11,7 +11,7 @@ Case Study 2 Schematic of Physics-Informed Neural Networks (PINNs).
 
 ## Summary of Case Studies
 
-| Case Study Number   | PINNs Inputs                          | PINNs Outputs                                | Loss Functions Terms  | Code Source                 |
+| Case Study Number   | PINNs Inputs                          | PINNs Outputs                                | Loss Functions Terms    | Code Source                 |
 |---------------------|---------------------------------------|----------------------------------------------|---------------------------------------------|-----------------------------|
 | Case_study_1        | Spatial and temporal domains          | Predicted deflection and internal forces     | $$L = L_{\text{pde}} + L_{\text{ic}} + L_{\text{bc}}$$ | Case_study_1/SN5/code.py    |
 | Case_study_2        | Spatial, temporal, and axle load domains | Predicted deflection and internal forces  | $$L = L_{\text{pde}} + L_{\text{ic}} + L_{\text{bc}}$$ | Case_study_2/main.py        |

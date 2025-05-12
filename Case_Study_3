@@ -1,0 +1,352 @@
+import torch
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+#import matplotlib.ticker as ticker
+from torch.optim import LBFGS
+import time
+import csv
+import torch.nn.functional as F
+from torch.utils.data import TensorDataset, DataLoader
+import torch.nn as nn
+# Check if GPU is available and set the default device accordingly
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f'Using device: {device}')
+# Clears cached memory
+torch.cuda.empty_cache()
+
+# Start timing
+start_time = time.time()
+
+#Loss_functions
+def compute_initial_condition_loss_l(model, x, t):
+    initial_points = torch.cat([x, t], dim=1)
+    # Compute model prediction at initial points
+    u_initial = model(initial_points)
+    # Compute the loss for initial condition u(x, 0) = 0
+    loss_initial_u = (u_initial ** 2).mean()
+    initial_condition_loss_l = loss_initial_u
+    return initial_condition_loss_l
+
+def compute_initial_condition_loss_lt(model, x, t):
+    # Ensure t has gradient tracking enabled
+    t.requires_grad_(True)
+    # Concatenate inputs along feature dimension
+    initial_points_grad = torch.cat([x, t], dim=1)
+    # Compute model prediction at initial points
+    u_initial_grad_l = model(initial_points_grad)
+    # Compute the gradient of u with respect to t
+    u_t_initial_l = torch.autograd.grad(u_initial_grad_l, t, grad_outputs=torch.ones_like(u_initial_grad_l), create_graph=True)[0]
+    #u_tt_initial_l = torch.autograd.grad(u_t_initial_l, t, grad_outputs=torch.ones_like(u_t_initial_l), create_graph=True)[0]
+    # Compute the loss for initial condition derivative u_t(x, 0) = 0
+    loss_initial_u_t = (u_t_initial_l ** 2).mean()
+    # Total initial condition loss
+    initial_condition_loss_lt = loss_initial_u_t
+    return initial_condition_loss_lt
+
+
+def compute_residual_loss(model, x, t, L, v, mu, EI):
+    # Ensure the inputs require gradients for derivative computation
+    x.requires_grad_(True)
+    t.requires_grad_(True)
+
+    # Create residual points and evaluate the model
+    residual_points = torch.cat([x, t], dim=1)
+    u = model(residual_points)
+
+    # Compute first, second, third, and fourth derivatives w.r.t. x
+    u_x = torch.autograd.grad(u, x, grad_outputs=torch.ones_like(u), create_graph=True)[0]
+    u_xx = torch.autograd.grad(u_x, x, grad_outputs=torch.ones_like(u_x), create_graph=True)[0]
+    u_xxx = torch.autograd.grad(u_xx, x, grad_outputs=torch.ones_like(u_xx), create_graph=True)[0]
+    u_xxxx = torch.autograd.grad(u_xxx, x, grad_outputs=torch.ones_like(u_xxx), create_graph=True)[0]
+
+    # Compute first and second time derivatives w.r.t. t
+    u_t = torch.autograd.grad(u, t, grad_outputs=torch.ones_like(u), create_graph=True)[0]
+    u_tt = torch.autograd.grad(u_t, t, grad_outputs=torch.ones_like(u_t), create_graph=True)[0]
+
+    # Axle loads
+    # Loads for each axle
+    p = [0.37, 0.37, 0.494, 0.494]  
+
+    # Distances and time lags for different axles in Seconds
+    Ld = 0.376  # Distance between first and fourth axle
+    Lc = 0.1157  # Distance between first and second axle
+    Le = 0.295  # Distance between first and third axle
+
+    # Calculate time lags
+    tj = Ld / v  # Time lag for first and fourth axles
+    tc = Lc / v  # Time lag for second axle
+    te = Le / v  # Time lag for third axle
+
+    # Initialize the total load effect as zero
+    total_load_effect = torch.zeros_like(x)
+
+    # Define the U_j function representing the load effect of each axle with time lag
+    def U_j(load_position_j, p_j, alpha=0.05):
+        # Approximate Dirac delta function (Gaussian distribution)
+        delta_j = (1.0 / (alpha * torch.sqrt(torch.tensor(np.pi)))) * torch.exp(
+            -load_position_j.pow(2) / (alpha**2))
+        return p_j * delta_j
+
+    # Loop over the axles and calculate load effects with different time lags
+    for j, p_j in enumerate(p):
+        # Compute the load position for the j-th axle with different time lags
+
+        # U_j(t, v, L): Effect of first axle (enters at t = 0)
+        if j == 0:
+            load_position_j = (x / L) - (v * (t - 0) / L)
+            total_load_effect += U_j(load_position_j, p_j)
+
+        # U_j(t - tj, v, L): Effect of fourth axle (time-lagged by tj, departs at t = L/v)
+        if j == 3:
+            load_position_j = (x / L) - (v * (t - tj) / L)
+            total_load_effect += U_j(load_position_j, p_j)
+
+        # U_j(t - tc, v, L): Effect of second axle (time-lagged by tc)
+        if j == 1:
+            load_position_j = (x / L) - (v * (t - tc) / L)
+            total_load_effect += U_j(load_position_j, p_j)
+
+        # U_j(t - te, v, L): Effect of third axle (time-lagged by te)
+        if j == 2:
+            load_position_j = (x / L) - (v * (t - te) / L)
+            total_load_effect += U_j(load_position_j, p_j)
+    # Loss for the PDE
+    loss_res = ((mu * u_tt + EI * u_xxxx - total_load_effect) ** 2).mean()
+    return loss_res
+
+def compute_boundary_loss_u_r(model, x_0, t_b):
+    x_0.requires_grad_(True)
+    t_b.requires_grad_(True)
+    u_r = model(torch.cat([x_0, t_b], dim=1))
+    #u_LL = model(torch.cat([x_L, t_b, p_b], dim=1))
+    # Boundary loss for deflection and curvature being zero at the boundaries
+    loss_boundary_u_r = u_r.pow(2).mean()
+    return loss_boundary_u_r
+
+def compute_boundary_loss_u_l(model, x_L, t_b):
+    x_L.requires_grad_(True)
+    t_b.requires_grad_(True)
+    u_l = model(torch.cat([x_L, t_b], dim=1))
+    # Boundary loss for deflection and curvature being zero at the boundaries
+    loss_boundary_u_l = u_l.pow(2).mean()
+    return loss_boundary_u_l
+
+def compute_boundary_loss_uu_r(model, x_0, t_b):
+    x_0.requires_grad_(True)
+    t_b.requires_grad_(True)
+    u_0 = model(torch.cat([x_0, t_b], dim=1))
+    #u_L = model(torch.cat([x_L, t_b, p_b], dim=1))
+    # Compute second spatial derivatives at the boundaries
+    u_xx_0 = torch.autograd.grad(torch.autograd.grad(u_0, x_0, grad_outputs=torch.ones_like(u_0), create_graph=True)[0], x_0, grad_outputs=torch.ones_like(u_0), create_graph=True)[0]
+    #u_xx_L = torch.autograd.grad(torch.autograd.grad(u_L, x_L, grad_outputs=torch.ones_like(u_L), create_graph=True)[0], x_L, grad_outputs=torch.ones_like(u_L), create_graph=True)[0]
+    # Boundary loss for deflection and curvature being zero at the boundaries
+    loss_boundary_uu_r = u_xx_0.pow(2).mean()
+    return loss_boundary_uu_r
+def compute_boundary_loss_uu_l(model, x_L, t_b):
+    x_L.requires_grad_(True)
+    t_b.requires_grad_(True)
+    #u_0 = model(torch.cat([x_0, t_b, p_b], dim=1))
+    u_L = model(torch.cat([x_L, t_b], dim=1))
+    # Compute second spatial derivatives at the boundaries
+    #u_xx_0 = torch.autograd.grad(torch.autograd.grad(u_0, x_0, grad_outputs=torch.ones_like(u_0), create_graph=True)[0], x_0, grad_outputs=torch.ones_like(u_0), create_graph=True)[0]
+    u_xx_L = torch.autograd.grad(torch.autograd.grad(u_L, x_L, grad_outputs=torch.ones_like(u_L), create_graph=True)[0], x_L, grad_outputs=torch.ones_like(u_L), create_graph=True)[0]
+    # Boundary loss for deflection and curvature being zero at the boundaries
+    loss_boundary_uu_l = u_xx_L.pow(2).mean()
+    return loss_boundary_uu_l
+
+def measurement_strain_data(model):
+    #Read the CSV file; data will be available upon reasonable request. 
+    df = pd.read_csv('strain_data_1SG2.csv')  
+    # Extract the columns from the DataFrame
+    #t_m = torch.tensor(df['t'].values, dtype=torch.float32).unsqueeze(1).to(device)
+    t_m = torch.tensor(df['TIME'].values, dtype=torch.float32).unsqueeze(1).to(device)
+    x_m = torch.tensor(df['X'].values, dtype=torch.float32).unsqueeze(1).to(device)
+    s_m = torch.tensor(df['S222'].values, dtype=torch.float32).unsqueeze(1).to(device)  #strain data
+    t_m.requires_grad_(True)
+    x_m.requires_grad_(True)
+    s_m.requires_grad_(True)
+    # Use the model to predict u for the given x and t
+    u_pred = model(torch.cat([x_m, t_m], dim=1))
+    u_x = torch.autograd.grad(u_pred, x_m, grad_outputs=torch.ones_like(u_pred), create_graph=True)[0]
+    u_xx = torch.autograd.grad(u_x, x_m, grad_outputs=torch.ones_like(u_x), create_graph=True)[0]
+    # Calculate the mean squared error loss between the predicted and actual deflections
+    s_pinn = -u_xx*0.431*(17.28*2*100)
+    loss_strain = ((s_pinn - s_m) ** 2).mean()
+    return loss_strain
+
+# PINN model
+class PINN(torch.nn.Module):
+    def __init__(self):
+        super(PINN, self).__init__()
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(2, 64),
+            torch.nn.Tanh(),
+            torch.nn.Linear(64,64),
+            torch.nn.Tanh(),
+            torch.nn.Linear(64, 64),
+            torch.nn.Tanh(),
+            torch.nn.Linear(64,64),
+            torch.nn.Tanh(),
+            torch.nn.Linear(64,64),
+            torch.nn.Tanh(),
+            torch.nn.Linear(64,1)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+# Initialize model, optimizer, and define parameters
+model = PINN().to(device)
+# Define optimizers
+adam_optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+lbfgs_optimizer = torch.optim.LBFGS(model.parameters(), lr=1e-5, max_iter=100, tolerance_grad=1e-5, tolerance_change=1e-9, history_size=50)
+
+# Set iteration thresholds
+N =30000 # Switch to LBFGS after N iterations
+N_max = 60000 #maximum iterations
+convergence_threshold = 1e-16 # Define a convergence criterion
+L, v, mu, EI = 1.00, 0.4115, (289*17.28*1e-5), (1033610000*1e-5)/17.28**3
+T =1.376*L/v
+max_x = L  # Beam length
+max_t = T  # Assuming maximum time of interest
+#max_p = p_max  # Maximum load value
+
+# Prepare data points for residual and boundary conditions
+torch.manual_seed(2000)
+np.random.seed(2000)
+x_res = torch.rand(4500, 1).to(device) * L
+t_res = torch.rand(4500, 1).to(device) * T
+
+# Combine the tensors into a single dataset
+dataset = TensorDataset(x_res, t_res)
+# Define the batch size
+batch_size = 4500
+#Create a DataLoader to handle batching
+dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+# Prepare data points for boundary conditions
+t_boundary = torch.rand(2000, 1).to(device)*T
+x_boundary_0 = torch.zeros_like(t_boundary).to(device)
+x_boundary_L = L * torch.ones_like(t_boundary).to(device)
+
+# Prepare data points for initial boundary conditions
+x_initial = torch.rand(2000, 1).to(device) * L
+t_initial_l = torch.zeros_like(x_initial).to(device)
+
+# Loss history for plotting
+loss_residual_history = []
+loss_boundary_u_r_history = []
+loss_boundary_u_l_history = []
+loss_boundary_uu_r_history = []
+loss_boundary_uu_l_history = []
+loss_initial_history_l = []
+loss_initial_history_lt = []
+loss_strain_history = []
+total_loss_history = []
+iteration_history = []
+
+# Function to perform an optimization step using LBFGS
+def lbfgs_step():
+    def closure():
+        lbfgs_optimizer.zero_grad()
+        # Recompute the losses inside the closure to ensure they're up-to-date
+        loss_residual = compute_residual_loss(model, x_batch, t_batch, L, v, mu, EI).to(device)
+        loss_boundary_u_r = compute_boundary_loss_u_r(model,  x_boundary_0, t_boundary).to(device)
+        loss_boundary_u_l = compute_boundary_loss_u_l(model,  x_boundary_L, t_boundary).to(device)
+        loss_boundary_uu_r = compute_boundary_loss_uu_r(model, x_boundary_0, t_boundary).to(device)
+        loss_boundary_uu_l = compute_boundary_loss_uu_l(model, x_boundary_L, t_boundary).to(device)
+        loss_initial_l = compute_initial_condition_loss_l(model, x_initial, t_initial_l).to(device)
+        loss_initial_lt = compute_initial_condition_loss_lt(model, x_initial, t_initial_l).to(device)
+        loss_strain = measurement_strain_data(model).to(device)
+        # Compute the weighted total loss directly
+        total_loss = loss_residual + loss_boundary_u_r + loss_boundary_u_l + loss_boundary_uu_r + loss_boundary_uu_l + loss_initial_l + loss_initial_lt + loss_strain
+        return total_loss
+    lbfgs_optimizer.step(closure)
+
+# Define the CSV file name
+
+csv_file_path = 'xt_22.csv'
+# Open the CSV file in write mode
+with open(csv_file_path, mode='w', newline='') as file:
+    # Create a CSV writer
+    writer = csv.writer(file)
+
+    # Write the header (column names)
+    writer.writerow(['Iteration', 'Total Loss', 'Loss Residual', 'Loss Boundary_u_r', 'Loss Boundary_u_l', 'Loss Boundary_uu_r', 'Loss Boundary_uu_l', 'Loss Initial_0', 'Loss Initial_1','Loss Strain'])
+
+    # Training loop
+    prev_loss = float('inf')
+    # Training loop
+    for j in range(1, N_max + 1):
+        if j <= N:
+            # Adam optimizer phase
+            batch_losses = []
+            for x_batch, t_batch in dataloader:
+                # Compute losses with gradients for optimization
+                loss_residual = compute_residual_loss(model, x_batch, t_batch, p, L, v, mu, EI).to(device)
+                loss_boundary_u_r = compute_boundary_loss_u_r(model, x_boundary_0, t_boundary).to(device)
+                loss_boundary_u_l = compute_boundary_loss_u_l(model, x_boundary_L, t_boundary).to(device)
+                loss_boundary_uu_r = compute_boundary_loss_uu_r(model, x_boundary_0, t_boundary).to(device)
+                loss_boundary_uu_l = compute_boundary_loss_uu_l(model, x_boundary_L, t_boundary).to(device)
+                loss_initial = compute_initial_condition_loss(model, x_initial, t_initial).to(device)
+                loss_initial_t = compute_initial_condition_loss_lt(model, x_initial, t_initial).to(device)
+                loss_strain = measurement_strain_data(model).to(device)
+                total_loss = loss_residual + loss_boundary_u_r + loss_boundary_u_l + loss_boundary_uu_r + loss_boundary_uu_l + loss_initial + loss_initial_t + loss_strain
+                adam_optimizer.zero_grad()
+                total_loss.backward()
+                adam_optimizer.step()
+                batch_losses.append(total_loss.item())
+
+        else:
+            # LBFGS optimizer phase
+            def closure():
+                lbfgs_optimizer.zero_grad()
+                loss_residual = compute_residual_loss(model, x_res, t_res, p, L, v, mu, EI).to(device)
+                loss_boundary_u_r = compute_boundary_loss_u_r(model, x_boundary_0, t_boundary).to(device)
+                loss_boundary_u_l = compute_boundary_loss_u_l(model, x_boundary_L, t_boundary).to(device)
+                loss_boundary_uu_r = compute_boundary_loss_uu_r(model, x_boundary_0, t_boundary).to(device)
+                loss_boundary_uu_l = compute_boundary_loss_uu_l(model, x_boundary_L, t_boundary).to(device)
+                loss_initial = compute_initial_condition_loss(model, x_initial, t_initial).to(device)
+                loss_initial_t = compute_initial_condition_loss_lt(model, x_initial, t_initial).to(device)
+                loss_strain = measurement_strain_data(model).to(device)
+                total_loss = loss_residual + loss_boundary_u_r + loss_boundary_u_l + loss_boundary_uu_r + loss_boundary_uu_l + loss_initial + loss_initial_t + loss_strain
+                total_loss.backward()
+                return total_loss
+            lbfgs_optimizer.step(closure)
+
+# Store loss values and iteration number
+      loss_residual_history.append(loss_residual.item())
+      loss_boundary_u_r_history.append(loss_boundary_u_r.item())
+      loss_boundary_u_l_history.append(loss_boundary_u_l.item())
+      loss_boundary_uu_r_history.append(loss_boundary_uu_r.item())
+      loss_boundary_uu_l_history.append(loss_boundary_uu_l.item())
+      loss_initial_history_l.append(loss_initial_l.item())
+      loss_initial_history_lt.append(loss_initial_lt.item())
+      loss_strain_history.append(loss_strain.item())
+      total_loss_history.append(total_loss.item())
+      iteration_history.append(j)
+      # Convergence check (simple version based on loss change; adapt as needed)
+      loss_change = prev_loss - total_loss.item()
+      if abs(loss_change) < convergence_threshold:
+          print(f"Converged after {j} iterations.")
+          break  # Exit the loop if converged
+      prev_loss = total_loss.item()
+      writer.writerow([j, total_loss.item(), loss_residual.item(), loss_boundary_u_r.item(), loss_boundary_u_l.item(), loss_boundary_uu_r.item(), loss_boundary_uu_l.item(), loss_initial_l.item(),loss_initial_lt.item(), loss_strain.item()])
+
+            # Optional: Print the loss every few iterations
+      if j % 100 == 0:
+          print(f"Iteration {j}, Total Loss: {total_loss.item()}, loss_residual: {loss_residual.item()}, loss_boundary_u_r: {loss_boundary_u_r.item()}, loss_boundary_u_l: {loss_boundary_u_l.item()}, loss_boundary_uu_r: {loss_boundary_uu_r.item()}, loss_boundary_uu_l: {loss_boundary_uu_l.item()},loss_initial_l: {loss_initial_l.item()}, loss_initial_lt: {loss_initial_lt.item()}, loss_strain: {loss_strain.item()}")        
+
+# End timing
+end_time = time.time()
+PATH = "xt_22.pth"
+torch.save({
+    'model_state_dict': model.state_dict(),
+    'adam_optimizer_state_dict': adam_optimizer.state_dict(),
+    'lbfgs_optimizer_state_dict': lbfgs_optimizer.state_dict(),
+}, PATH)
+# Calculate and print the elapsed time
+elapsed_time = end_time - start_time
+print(f"Training completed in {elapsed_time:.2f} seconds.")
+model.eval()

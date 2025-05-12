@@ -13,6 +13,6 @@ Case Study 2 Schematic of Physics-Informed Neural Networks (PINNs).
 
 | Case Study Number   | Inputs               | Outputs              | Loss Functions Terms    | Code Source            |
 |---------------------|----------------------|----------------------|-------------------------|------------------------|
-| Case_study_1/SN5    | Sensor data (SN5)    | Predicted values     | MSE + Regularization    | Case_study_1/SN5/code.py |
-| Case_study_2        | Time-series data     | Classification       | Cross-Entropy           | Case_study_2/main.py   |
-| Case_study_3/SN4    | Sensor data (SN4)    | Regression output    | MAE + L2 Penalty        | Case_study_3/SN4/script.py |
+| Case_study_1        | Sptial and temporal domains   | Predicted values     | MSE + Regularization    | Case_study_1/SN5/code.py |
+| Case_study_2        | Sptail, temporal and axle load domains | Classification       | Cross-Entropy           | Case_study_2/main.py   |
+| Case_study_3        | Sptial, temporal domains, and sensor data   | Regression output    | MAE + L2 Penalty        | Case_study_3/SN4/script.py |
